@@ -67,6 +67,17 @@ class EfficientTAMOnlineBatchTracker(EfficientTAMBase):
             img_t, size=(self.image_size, self.image_size),
             mode="bilinear", align_corners=False, antialias=True
         )
+    
+    def _normalize_image(self, img_t: torch.Tensor) -> torch.Tensor:
+        """
+        img_t: [1, 3, H, W] float tensor (0..255 or 0..1)
+        Normalize to ImageNet stats.
+        """
+        if img_t.max() > 1.0:
+            img_t = img_t / 255.0
+        mean = torch.as_tensor([0.485, 0.456, 0.406], device=img_t.device).view(1, 3, 1, 1)
+        std = torch.as_tensor([0.229, 0.224, 0.225], device=img_t.device).view(1, 3, 1, 1)
+        return (img_t - mean) / std
 
     def _expand_backbone_to_batch(self, backbone_out, B):
         """
@@ -111,119 +122,6 @@ class EfficientTAMOnlineBatchTracker(EfficientTAMBase):
                 cached = [x[0:1].clone() for x in out_maskmem_pos_enc]
                 self._constants["maskmem_pos_enc"] = cached
 
-    
-
-    # ------------- public API -------------
-
-    # @torch.inference_mode()
-    # def initialize(
-    #     self,
-    #     image,                    # HxWx3 (numpy or list-like, uint8/float ok)
-    #     points_list,              # List[List[[x,y], ...]] length = B
-    #     labels_list,              # List[List[int, ...]]   length = B
-    #     normalize_coords: bool = True,
-    # ):
-    #     """
-    #     Initialize from FIRST frame and batched point prompts.
-
-    #     Enforces: each object has EXACTLY the same number of clicks.
-    #     """
-    #     # -- inputs -> tensors
-    #     import numpy as np
-
-    #     img_np = np.asarray(image)
-    #     assert img_np.ndim == 3 and img_np.shape[2] == 3, "image must be HxWx3"
-    #     self._video_H, self._video_W = int(img_np.shape[0]), int(img_np.shape[1])
-
-    #     self._storage_device = self._device  # keep same behavior as predictor by default
-    #     self._B = int(len(points_list))
-    #     assert self._B > 0, "Need at least one object."
-
-    #     # enforce equal number of clicks per object
-    #     num_clicks = [len(p) for p in points_list]
-    #     assert all(nc == num_clicks[0] for nc in num_clicks), \
-    #         f"All objects must have the SAME number of clicks, got {num_clicks}"
-    #     P = num_clicks[0]
-    #     assert P > 0, "At least one click per object is required."
-
-    #     # Build point_inputs (normalize -> scale by image_size)
-    #     # points_list: list of length B, each is list of [x,y] in ORIGINAL pixel coords
-    #     pts = torch.tensor(points_list, dtype=torch.float32, device=self._device)  # [B, P, 2]
-    #     labs = torch.tensor(labels_list, dtype=torch.int32, device=self._device)   # [B, P]
-
-    #     if normalize_coords:
-    #         norm = torch.tensor([self._video_W, self._video_H], device=self._device, dtype=torch.float32)
-    #         pts = pts / norm  # [0..1] by (W,H)
-    #     pts = pts * float(self.image_size)  # scale to model’s internal coordinate space
-
-    #     point_inputs = {
-    #         "point_coords": pts,      # [B, P, 2]
-    #         "point_labels": labs,     # [B, P]
-    #     }
-
-    #     # Make the image tensor [1,3,H,W] float, resize to image_size, no extra normalization
-    #     img_t = torch.as_tensor(img_np, device=self._device)
-    #     if img_t.dtype != torch.float32:
-    #         img_t = img_t.float()
-    #     img_t = img_t.permute(2, 0, 1).unsqueeze(0)  # 1,3,H,W
-    #     img_t = self._resize_image_to_model(img_t)
-
-    #     # 1) forward_image on the single frame
-    #     backbone_out = self.forward_image(img_t)
-    #     # 2) expand to batch B (so we can track all objects together)
-    #     backbone_exp = self._expand_backbone_to_batch(backbone_out, self._B)
-    #     # 3) flatten into the tuple EfficientTAMBase.track_step expects
-    #     _, vfeats, vpos, fsizes = self._prepare_backbone_features(backbone_exp)
-
-    #     # Run track step on the FIRST frame as initial conditioning (run memory encoder!)
-    #     current_out = self.track_step(
-    #         frame_idx=0,
-    #         is_init_cond_frame=True,
-    #         current_vision_feats=vfeats,
-    #         current_vision_pos_embeds=vpos,
-    #         feat_sizes=fsizes,
-    #         point_inputs=point_inputs,   # batched clicks
-    #         mask_inputs=None,            # no mask / no box
-    #         output_dict={"cond_frame_outputs": {}, "non_cond_frame_outputs": {}},
-    #         num_frames=1,
-    #         track_in_reverse=False,
-    #         run_mem_encoder=True,
-    #     )
-
-    #     # Optionally fill holes (same as predictor does inside _run_single_frame_inference)
-    #     pred_masks = current_out["pred_masks"]  # [B,1,h,w] logits (low-res)
-    #     if self.fill_hole_area > 0:
-    #         # identical to predictor path
-    #         # (we keep it simple and do fill on low-res; predictor does it right after sam)
-    #         from efficient_track_anything.utils.misc import fill_holes_in_mask_scores
-    #         pred_masks = fill_holes_in_mask_scores(pred_masks, self.fill_hole_area)
-    #         current_out["pred_masks"] = pred_masks
-
-    #     # Cache maskmem_pos_enc slice once (like predictor)
-    #     self._maybe_cache_maskmem_pos_enc(current_out)
-
-    #     # Store as conditioning memory for frame 0 (batched across objects)
-    #     # Keep the minimal fields used later by the encoder:
-    #     init_out = {
-    #         "maskmem_features": current_out["maskmem_features"],   # [B,C,Hm,Wm]
-    #         "maskmem_pos_enc": current_out["maskmem_pos_enc"],     # list of [B,C,*,*]
-    #         "pred_masks": current_out["pred_masks"],               # [B,1,h,w] (low-res logits)
-    #         "obj_ptr": current_out["obj_ptr"],                     # [B,C]
-    #         "object_score_logits": current_out.get("object_score_logits", None),  # [B,1]
-    #     }
-    #     self._output_dict["cond_frame_outputs"].clear()
-    #     self._output_dict["non_cond_frame_outputs"].clear()
-    #     self._output_dict["cond_frame_outputs"][0] = init_out
-
-    #     # produce video-res logits for output
-    #     video_res = self._to_video_res_and_constrain(pred_masks.to(self._device))
-    #     self._initialized = True
-    #     self._t = 0
-    #     return {
-    #         "frame_idx": 0,
-    #         "pred_masks_video_res": video_res,  # [B,1,H,W] logits
-    #     }
-
     @torch.inference_mode()
     def initialize(
         self,
@@ -253,6 +151,7 @@ class EfficientTAMOnlineBatchTracker(EfficientTAMBase):
         # --- image -> model size ---
         img_t = torch.as_tensor(img_np, device=self._device).float().permute(2, 0, 1).unsqueeze(0)
         img_t = self._resize_image_to_model(img_t)
+        img_t = self._normalize_image(img_t)
 
         # --- shared backbone once ---
         backbone_out = self.forward_image(img_t)
@@ -361,6 +260,7 @@ class EfficientTAMOnlineBatchTracker(EfficientTAMBase):
             img_t = img_t.float()
         img_t = img_t.permute(2, 0, 1).unsqueeze(0)
         img_t = self._resize_image_to_model(img_t)
+        img_t = self._normalize_image(img_t)
 
         # single-image backbone -> expand to batch B
         backbone_out = self.forward_image(img_t)
