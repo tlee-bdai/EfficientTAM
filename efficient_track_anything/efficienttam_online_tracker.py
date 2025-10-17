@@ -33,6 +33,7 @@ class EfficientTAMOnlineBatchTracker(EfficientTAMBase):
         # Online state
         self._initialized = False
         self._t = 0  # current frame index in the online stream
+        self._num_frame_init = 0
         self._video_H = None
         self._video_W = None
         self._B = 0  # number of objects
@@ -140,9 +141,9 @@ class EfficientTAMOnlineBatchTracker(EfficientTAMBase):
         assert B > 0, "Need at least one object."
         # enforce equal clicks per object
         num_clicks = [len(p) for p in points_list]
-        assert all(nc == num_clicks[0] for nc in num_clicks), f"Unequal clicks per object: {num_clicks}"
-        P = num_clicks[0]
-        assert P > 0, "At least one click per object is required."
+        # assert all(nc == num_clicks[0] for nc in num_clicks), f"Unequal clicks per object: {num_clicks}"
+        # P = num_clicks[0]
+        # assert P > 0, "At least one click per object is required."
 
         self._video_H, self._video_W = H, W
         self._storage_device = self._device
@@ -235,8 +236,311 @@ class EfficientTAMOnlineBatchTracker(EfficientTAMBase):
         # video-resize for return
         video_res = self._to_video_res_and_constrain(current_out["pred_masks"].to(self._device))
         self._initialized = True
+        self._num_frame_init = 1
         self._t = 0
         return {"frame_idx": 0, "pred_masks_video_res": video_res}
+
+
+    # @torch.inference_mode()
+    # def initialize_w_multiple_images(
+    #     self,
+    #     images,             # List[np.ndarray] or single np.ndarray
+    #     points_lists,       # List of List[List[[x, y], ...]] (N × B)
+    #     labels_lists,       # List of List[List[int, ...]] (N × B)
+    #     normalize_coords: bool = True,
+    # ):
+    #     # ---- Handle single or multi-frame input ----
+    #     if isinstance(images, np.ndarray):
+    #         images = [images]
+    #         points_lists = [points_lists]
+    #         labels_lists = [labels_lists]
+
+    #     num_frames = len(images)
+    #     assert num_frames == len(points_lists) == len(labels_lists), \
+    #         f"Need same number of images, points_lists, and labels_lists ({len(images)}, {len(points_lists)}, {len(labels_lists)})"
+
+    #     img0 = np.asarray(images[0])
+    #     H, W = img0.shape[:2]
+    #     B = len(points_lists[0])
+    #     assert B > 0, "At least one object must be annotated."
+
+    #     self._video_H, self._video_W = H, W
+    #     self._B = B
+    #     self._storage_device = self._device
+        
+    #     # output memory container
+    #     cond_outputs = {}
+    #     self._output_dict["cond_frame_outputs"].clear()
+    #     self._output_dict["non_cond_frame_outputs"].clear()
+
+    #     # ---- Iterate over all annotated images ----
+    #     for f_idx, (img_np, points_list, labels_list) in enumerate(zip(images, points_lists, labels_lists)):
+    #         img_np = np.asarray(img_np)
+    #         assert img_np.ndim == 3 and img_np.shape[2] == 3, f"Frame {f_idx}: image must be HxWx3"
+
+    #         # to tensor, normalize
+    #         img_t = torch.as_tensor(img_np, device=self._device).float().permute(2, 0, 1).unsqueeze(0)
+    #         img_t = self._resize_image_to_model(img_t)
+    #         img_t = self._normalize_image(img_t)
+
+    #         # backbone
+    #         backbone_out = self.forward_image(img_t)
+    #         _, vfeats_base, vpos_base, fsizes = self._prepare_backbone_features(backbone_out)
+
+    #         # sanity: consistent number of objects
+    #         assert len(points_list) == B, f"Frame {f_idx}: number of objects mismatch"
+
+    #         # ---- per-object click inputs ----
+    #         all_outs = []
+    #         for b in range(B):
+    #             pts = torch.tensor(points_list[b], dtype=torch.float32, device=self._device)  # [P,2]
+    #             labs = torch.tensor(labels_list[b], dtype=torch.int32, device=self._device)   # [P]
+    #             if normalize_coords:
+    #                 pts = pts / torch.tensor([W, H], device=self._device)
+    #             pts = pts * float(self.image_size)
+
+    #             point_inputs = {
+    #                 "point_coords": pts.unsqueeze(0),  # [1,P,2]
+    #                 "point_labels": labs.unsqueeze(0), # [1,P]
+    #             }
+
+    #             # ---- Run two-pass initialization (click → prev_logits → encode) ----
+    #             click_out = self.track_step(
+    #                 frame_idx=f_idx,
+    #                 is_init_cond_frame=True,
+    #                 current_vision_feats=vfeats_base,
+    #                 current_vision_pos_embeds=vpos_base,
+    #                 feat_sizes=fsizes,
+    #                 point_inputs=point_inputs,
+    #                 mask_inputs=None,
+    #                 output_dict={"cond_frame_outputs": {}, "non_cond_frame_outputs": {}},
+    #                 num_frames=f_idx + 1,
+    #                 track_in_reverse=False,
+    #                 run_mem_encoder=False,
+    #             )
+
+    #             prev_logits = torch.clamp(click_out["pred_masks"], -32.0, 32.0)
+
+    #             current_out = self.track_step(
+    #                 frame_idx=f_idx,
+    #                 is_init_cond_frame=True,
+    #                 current_vision_feats=vfeats_base,
+    #                 current_vision_pos_embeds=vpos_base,
+    #                 feat_sizes=fsizes,
+    #                 point_inputs=point_inputs,
+    #                 mask_inputs=None,
+    #                 output_dict={"cond_frame_outputs": {}, "non_cond_frame_outputs": {}},
+    #                 num_frames=f_idx + 1,
+    #                 track_in_reverse=False,
+    #                 run_mem_encoder=True,
+    #                 prev_sam_mask_logits=prev_logits,
+    #             )
+    #             all_outs.append(current_out)
+
+    #         # ---- Stack outputs for all objects ----
+    #         def _cat_if_tensor_list(x_list):
+    #             if isinstance(x_list[0], torch.Tensor):
+    #                 return torch.cat(x_list, dim=0)
+    #             return [torch.cat([x[i] for x in x_list], dim=0) for i in range(len(x_list[0]))]
+
+    #         current_out = {
+    #             "maskmem_features": _cat_if_tensor_list([o["maskmem_features"] for o in all_outs]),
+    #             "maskmem_pos_enc":  _cat_if_tensor_list([o["maskmem_pos_enc"]  for o in all_outs]),
+    #             "pred_masks":       _cat_if_tensor_list([o["pred_masks"]       for o in all_outs]),
+    #             "obj_ptr":          _cat_if_tensor_list([o["obj_ptr"]          for o in all_outs]),
+    #             "object_score_logits": (
+    #                 torch.cat([o["object_score_logits"] for o in all_outs], dim=0)
+    #                 if all_outs[0].get("object_score_logits") is not None else None
+    #             ),
+    #         }
+
+    #         # store as conditioning memory for this frame
+    #         cond_outputs[f_idx] = current_out
+
+    #     # ---- finalize ----
+    #     self._maybe_cache_maskmem_pos_enc(current_out)
+    #     self._output_dict["cond_frame_outputs"] = cond_outputs
+
+    #     video_res = [ self._to_video_res_and_constrain(cond_outputs[f_idx]["pred_masks"].to(self._device))   for f_idx in range(len(images))]
+    #     self._initialized = True
+    #     self._num_frame_init = num_frames
+    #     self._t = 0
+
+    #     return {"frame_idx": self._t, "pred_masks_video_res": video_res}
+
+    @torch.inference_mode()
+    def initialize_w_multiple_images(
+        self,
+        images,            # list[np.ndarray] or single np.ndarray
+        points_dicts,      # list[dict[obj_id, list[[x, y], ...]]]
+        labels_dicts,      # list[dict[obj_id, list[int]]]
+        normalize_coords: bool = True,
+    ):
+        """
+        Multi-frame flexible initialization.
+
+        Each image can annotate any subset of objects (by obj_id),
+        each object can appear in any subset of frames,
+        and the number of points per object can differ.
+
+        Result: self._output_dict["cond_frame_outputs"]
+            is a list of per-frame dicts, each containing a full
+            batch (B = total objects) where missing objects
+            are filled with NO_OBJ_SCORE masks.
+        """
+
+        if isinstance(images, np.ndarray):
+            images = [images]
+        assert len(images) == len(points_dicts) == len(labels_dicts), \
+            "Each image must have matching points_dicts and labels_dicts"
+
+        # Collect all unique object IDs
+        all_obj_ids = sorted(set().union(*[set(d.keys()) for d in points_dicts]))
+        B = len(all_obj_ids)
+        id_to_idx = {oid: i for i, oid in enumerate(all_obj_ids)}
+
+        # Record video size and device
+        H, W = images[0].shape[:2]
+        self._video_H, self._video_W = H, W
+        self._B = B
+        self._storage_device = self._device
+
+        # Clear memory
+        self._output_dict["cond_frame_outputs"].clear()
+        self._output_dict["non_cond_frame_outputs"].clear()
+
+        for f_idx, (img_np, pts_dict, labs_dict) in enumerate(zip(images, points_dicts, labels_dicts)):
+            img_np = np.asarray(img_np)
+            assert img_np.ndim == 3 and img_np.shape[2] == 3, f"Frame {f_idx} must be HxWx3"
+
+            # --- preprocess image
+            img_t = torch.as_tensor(img_np, device=self._device).float().permute(2, 0, 1).unsqueeze(0)
+            img_t = self._resize_image_to_model(img_t)
+            img_t = self._normalize_image(img_t)
+
+            backbone_out = self.forward_image(img_t)
+            _, vfeats, vpos, fsizes = self._prepare_backbone_features(backbone_out)
+
+            # --- allocate placeholders
+            mask_placeholder = torch.full(
+                (B, 1, self.image_size // 4, self.image_size // 4),
+                fill_value=NO_OBJ_SCORE,
+                dtype=torch.float32,
+                device=self._device,
+            )
+            maskmem_feats_list = []
+            maskmem_pos_list = []
+            obj_ptr_list = []
+            obj_score_list = []
+
+            # --- process annotated objects only
+            for obj_id, pts_list in pts_dict.items():
+                obj_idx = id_to_idx[obj_id]
+                labs_list = labs_dict.get(obj_id, [1] * len(pts_list))
+
+                pts = torch.tensor(pts_list, dtype=torch.float32, device=self._device)
+                labs = torch.tensor(labs_list, dtype=torch.int32, device=self._device)
+                if normalize_coords:
+                    pts = pts / torch.tensor([W, H], device=self._device)
+                pts = pts * float(self.image_size)
+                point_inputs = {"point_coords": pts.unsqueeze(0), "point_labels": labs.unsqueeze(0)}
+
+                # ---- Two-pass initialization
+                click_out = self.track_step(
+                    frame_idx=f_idx,
+                    is_init_cond_frame=True,
+                    current_vision_feats=vfeats,
+                    current_vision_pos_embeds=vpos,
+                    feat_sizes=fsizes,
+                    point_inputs=point_inputs,
+                    mask_inputs=None,
+                    output_dict={"cond_frame_outputs": {}, "non_cond_frame_outputs": {}},
+                    num_frames=f_idx + 1,
+                    track_in_reverse=False,
+                    run_mem_encoder=False,
+                )
+                prev_logits = torch.clamp(click_out["pred_masks"], -32.0, 32.0)
+
+                current_out = self.track_step(
+                    frame_idx=f_idx,
+                    is_init_cond_frame=True,
+                    current_vision_feats=vfeats,
+                    current_vision_pos_embeds=vpos,
+                    feat_sizes=fsizes,
+                    point_inputs=point_inputs,
+                    mask_inputs=None,
+                    output_dict={"cond_frame_outputs": {}, "non_cond_frame_outputs": {}},
+                    num_frames=f_idx + 1,
+                    track_in_reverse=False,
+                    run_mem_encoder=True,
+                    prev_sam_mask_logits=prev_logits,
+                )
+
+                # --- fill batch slot for this object
+                mask_placeholder[obj_idx:obj_idx+1] = current_out["pred_masks"]
+                maskmem_feats_list.append(current_out["maskmem_features"])
+                maskmem_pos_list.append(current_out["maskmem_pos_enc"])
+                obj_ptr_list.append(current_out["obj_ptr"])
+                obj_score_list.append(current_out["object_score_logits"])
+
+            # --- build consolidated frame output
+            # if maskmem_feats_list:
+            #     maskmem_features = torch.cat(maskmem_feats_list, dim=0)
+            #     maskmem_pos_enc = maskmem_pos_list[0]
+            #     obj_ptr = torch.cat(obj_ptr_list, dim=0)
+            #     obj_score_logits = torch.cat(obj_score_list, dim=0)
+            # else:
+            #     maskmem_features = maskmem_pos_enc = obj_ptr = obj_score_logits = None
+            
+            # allocate empty tensors for full batch (B objects)
+            maskmem_features = torch.zeros(
+                (B, *maskmem_feats_list[0].shape[1:]),
+                dtype=maskmem_feats_list[0].dtype,
+                device=self._device,
+            )
+            maskmem_pos_enc = [
+                torch.zeros((B, *pos.shape[1:]), dtype=pos.dtype, device=self._device)
+                for pos in maskmem_pos_list[0]
+            ]
+            obj_ptr = torch.zeros((B, *obj_ptr_list[0].shape[1:]), dtype=obj_ptr_list[0].dtype, device=self._device)
+            obj_score_logits = torch.zeros((B, *obj_score_list[0].shape[1:]), dtype=obj_score_list[0].dtype, device=self._device)
+
+            # fill valid object slots
+            for j, obj_id in enumerate(pts_dict.keys()):
+                obj_idx = id_to_idx[obj_id]
+                maskmem_features[obj_idx:obj_idx+1] = maskmem_feats_list[j]
+                for k in range(len(maskmem_pos_enc)):
+                    maskmem_pos_enc[k][obj_idx:obj_idx+1] = maskmem_pos_list[j][k]
+                obj_ptr[obj_idx:obj_idx+1] = obj_ptr_list[j]
+                obj_score_logits[obj_idx:obj_idx+1] = obj_score_list[j]
+
+            consolidated_out = {
+                "maskmem_features": maskmem_features,
+                "maskmem_pos_enc": maskmem_pos_enc,
+                "pred_masks": mask_placeholder,
+                "obj_ptr": obj_ptr,
+                "object_score_logits": obj_score_logits,
+            }
+
+            self._output_dict["cond_frame_outputs"][f_idx] = consolidated_out
+
+        # --- finalize memory cache
+        if len(self._output_dict["cond_frame_outputs"]) > 0:
+            last_out = next(reversed(self._output_dict["cond_frame_outputs"].values()))
+            self._maybe_cache_maskmem_pos_enc(last_out)
+
+        self._initialized = True
+        self._num_frame_init = len(images)
+        self._t = 0
+
+        # --- prepare return (video-res logits for the last frame)
+        last_masks = last_out["pred_masks"]
+        video_res = self._to_video_res_and_constrain(last_masks.to(self._device))
+        return {
+            "frame_idx": self._t,
+            "pred_masks_video_res": video_res,
+            "object_id_to_batch_idx": id_to_idx,
+        }
 
 
 
@@ -250,7 +554,6 @@ class EfficientTAMOnlineBatchTracker(EfficientTAMBase):
         assert self._initialized, "Call initialize() with the first frame before step()."
 
         # to tensor, resize to image_size
-        import numpy as np
         img_np = np.asarray(image)
         assert img_np.ndim == 3 and img_np.shape[2] == 3, "image must be HxWx3"
         # (We keep original H,W for output resizing; for online streams they may vary; if they do,
@@ -269,7 +572,7 @@ class EfficientTAMOnlineBatchTracker(EfficientTAMBase):
 
         # No points/masks for tracking frames
         current_out = self.track_step(
-                        frame_idx=self._t + 1,
+                        frame_idx=self._t + self._num_frame_init,
                         is_init_cond_frame=False,
                         current_vision_feats=vfeats,
                         current_vision_pos_embeds=vpos,
@@ -277,7 +580,7 @@ class EfficientTAMOnlineBatchTracker(EfficientTAMBase):
                         point_inputs=None,
                         mask_inputs=None,
                         output_dict=self._output_dict,  # batched memories
-                        num_frames=max(self._t + 1, self.num_maskmem+1),         # <-- correct
+                        num_frames=self._t + self._num_frame_init,         # <-- correct
                         track_in_reverse=False,
                         run_mem_encoder=True,
                     )
@@ -308,7 +611,7 @@ class EfficientTAMOnlineBatchTracker(EfficientTAMBase):
 
         if self._t > self.num_maskmem:
             self._output_dict["non_cond_frame_outputs"].pop(self._t - self.num_maskmem)
-        print(self._t, self._output_dict["non_cond_frame_outputs"].keys())
+        # print(self._t, self._output_dict["non_cond_frame_outputs"].keys())
         return {
             "frame_idx": self._t,
             "pred_masks_video_res": video_res,  # [B,1,H,W] logits
@@ -566,3 +869,4 @@ class EfficientTAMOnlineBatchTrackerVOS(EfficientTAMOnlineBatchTracker):
             )
 
         return maskmem_features, maskmem_pos_enc
+
