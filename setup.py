@@ -43,6 +43,7 @@ REQUIRED_PACKAGES = [
     # "opencv-python>=4.7.0",
     # "moviepy==1.0.3",
     # "supervision==0.25.0",
+    "hydra-core>=1.3.2",
 ]
 
 EXTRA_PACKAGES = {
