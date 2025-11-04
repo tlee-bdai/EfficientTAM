@@ -189,6 +189,7 @@ setup(
     package_data={
         "efficient_track_anything": [
             "configs/**/*.yaml",   # include all YAML configs recursively
+            "csrc/*.cu",
         ],
     },
     install_requires=REQUIRED_PACKAGES,
