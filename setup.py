@@ -185,6 +185,11 @@ setup(
     license=LICENSE,
     packages=find_packages(exclude="notebooks"),
     include_package_data=True,
+    package_data={
+        "efficient_track_anything": [
+            "configs/**/*.yaml",   # include all YAML configs recursively
+        ],
+    },
     install_requires=REQUIRED_PACKAGES,
     extras_require=EXTRA_PACKAGES,
     python_requires=">=3.10.0",
