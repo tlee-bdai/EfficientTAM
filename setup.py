@@ -10,6 +10,7 @@ import os
 
 from setuptools import find_packages, setup
 
+
 # Package metadata
 NAME = "efficient_track_anything"
 VERSION = "1.0"
@@ -25,6 +26,7 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 # Required dependencies
 REQUIRED_PACKAGES = [
+    # "torch",
     # "torch>=2.5.1",
     # "torchvision>=0.20.1",
     # "numpy>=1.24.4",
@@ -105,7 +107,6 @@ def get_extensions():
 
     try:
         from torch.utils.cpp_extension import CUDAExtension
-
         srcs = ["efficient_track_anything/csrc/connected_components.cu"]
         compile_args = {
             "cxx": [],
@@ -191,6 +192,7 @@ setup(
             "configs/**/*.yaml",   # include all YAML configs recursively
             "csrc/*.cu",
         ],
+        "checkpoints": ["*.sh"],
     },
     install_requires=REQUIRED_PACKAGES,
     extras_require=EXTRA_PACKAGES,

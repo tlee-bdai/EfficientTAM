@@ -195,6 +195,17 @@ def _hf_download(model_id):
     ckpt_path = hf_hub_download(repo_id=model_id, filename=checkpoint_name)
     return config_name, ckpt_path
 
+def run_download_checkpoint_shell():
+    ## inside checkpoints folder of EfficientTAM repo
+    ## run download_checkpoints.sh inside the checkpoints folder
+
+    import subprocess
+    script_dir = os.path.join(
+        os.path.dirname(efficient_track_anything.__path__[0]), "checkpoints"
+    )
+    subprocess.run(["bash", "download_checkpoints.sh"], cwd=script_dir, check=True)
+
+
 
 def build_efficienttam_hf(model_id, **kwargs):
     config_name, ckpt_path = _hf_download(model_id)
