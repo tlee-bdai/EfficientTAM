@@ -68,14 +68,13 @@ class EfficientTAMOnlineBatchTracker(EfficientTAMBase):
             img_t, size=(self.image_size, self.image_size),
             mode="bilinear", align_corners=False, antialias=True
         )
-    
+
     def _normalize_image(self, img_t: torch.Tensor) -> torch.Tensor:
         """
         img_t: [1, 3, H, W] float tensor (0..255 or 0..1)
         Normalize to ImageNet stats.
         """
-        if img_t.max() > 1.0:
-            img_t = img_t / 255.0
+        img_t = torch.where(img_t.max() > 1.0, img_t / 255.0, img_t)
         mean = torch.as_tensor([0.485, 0.456, 0.406], device=img_t.device).view(1, 3, 1, 1)
         std = torch.as_tensor([0.229, 0.224, 0.225], device=img_t.device).view(1, 3, 1, 1)
         return (img_t - mean) / std
@@ -267,7 +266,7 @@ class EfficientTAMOnlineBatchTracker(EfficientTAMBase):
     #     self._video_H, self._video_W = H, W
     #     self._B = B
     #     self._storage_device = self._device
-        
+
     #     # output memory container
     #     cond_outputs = {}
     #     self._output_dict["cond_frame_outputs"].clear()
@@ -491,7 +490,7 @@ class EfficientTAMOnlineBatchTracker(EfficientTAMBase):
             #     obj_score_logits = torch.cat(obj_score_list, dim=0)
             # else:
             #     maskmem_features = maskmem_pos_enc = obj_ptr = obj_score_logits = None
-            
+
             # allocate empty tensors for full batch (B objects)
             maskmem_features = torch.zeros(
                 (B, *maskmem_feats_list[0].shape[1:]),
@@ -542,7 +541,77 @@ class EfficientTAMOnlineBatchTracker(EfficientTAMBase):
             "object_id_to_batch_idx": id_to_idx,
         }
 
+    @torch.inference_mode()
+    def step_torch(self, img_t):
+        """
+        Track on the NEXT frame (t -> t+1) for all objects in batch.
+        Returns mask logits resized to original resolution.
+        """
+        assert self._initialized, "Call initialize() with the first frame before step()."
 
+        # to tensor, resize to image_size
+        # img_np = np.asarray(image)
+        # assert img_np.ndim == 3 and img_np.shape[2] == 3, "image must be HxWx3"
+        # (We keep original H,W for output resizing; for online streams they may vary; if they do,
+        # we follow the first frame's H,W to keep consistent scaling like the video predictor.)
+        # img_t = torch.as_tensor(img_np, device=self._device)
+        if img_t.dtype != torch.float32:
+            img_t = img_t.float()
+        img_t = img_t.permute(2, 0, 1).unsqueeze(0)
+        img_t = self._resize_image_to_model(img_t)
+        img_t = self._normalize_image(img_t)
+
+        # single-image backbone -> expand to batch B
+        backbone_out = self.forward_image(img_t)
+        backbone_exp = self._expand_backbone_to_batch(backbone_out, self._B)
+        _, vfeats, vpos, fsizes = self._prepare_backbone_features(backbone_exp)
+
+        # No points/masks for tracking frames
+        current_out = self.track_step(
+                        frame_idx=self._t + self._num_frame_init,
+                        is_init_cond_frame=False,
+                        current_vision_feats=vfeats,
+                        current_vision_pos_embeds=vpos,
+                        feat_sizes=fsizes,
+                        point_inputs=None,
+                        mask_inputs=None,
+                        output_dict=self._output_dict,  # batched memories
+                        num_frames=self._t + self._num_frame_init,         # <-- correct
+                        track_in_reverse=False,
+                        run_mem_encoder=True,
+                    )
+
+
+        # Fill holes if requested (same spot as initialize)
+        pred_masks = current_out["pred_masks"]  # [B,1,h,w] logits
+        if self.fill_hole_area > 0:
+            from efficient_track_anything.utils.misc import fill_holes_in_mask_scores
+            pred_masks = fill_holes_in_mask_scores(pred_masks, self.fill_hole_area)
+            current_out["pred_masks"] = pred_masks
+
+        # Update bank: add this frame as non-conditioning memory (batched)
+        non_cond_out = {
+            "maskmem_features": current_out["maskmem_features"],
+            "maskmem_pos_enc": current_out["maskmem_pos_enc"]
+                if current_out["maskmem_pos_enc"] is not None
+                else self._expand_cached_maskmem_pos_enc(self._B),
+            "pred_masks": current_out["pred_masks"],
+            "obj_ptr": current_out["obj_ptr"],
+            "object_score_logits": current_out.get("object_score_logits", None),
+        }
+        self._output_dict["non_cond_frame_outputs"][self._t + 1] = non_cond_out
+
+        # output video-res logits
+        video_res = self._to_video_res_and_constrain(pred_masks.to(self._device))
+        self._t += 1
+
+        if self._t > self.num_maskmem:
+            self._output_dict["non_cond_frame_outputs"].pop(self._t - self.num_maskmem)
+        # print(self._t, self._output_dict["non_cond_frame_outputs"].keys())
+        return {
+            "frame_idx": self._t,
+            "pred_masks_video_res": video_res,  # [B,1,H,W] logits
+        }
 
 
     @torch.inference_mode()
