@@ -15,9 +15,13 @@ from efficient_track_anything.modeling.efficienttam_utils import MLP
 from efficient_track_anything.modeling.position_encoding import (
     apply_rotary_enc,
     compute_axial_cis,
+    get_rotation_matrices,
+    apply_rotary_matenc_512
 )
 from torch import nn, Tensor
 
+# Use matrix version of rotrary enc
+USE_MAT_ROTARY_ENC = True
 
 class TwoWayTransformer(nn.Module):
     def __init__(
@@ -265,15 +269,20 @@ class RoPEAttention(Attention):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-
-        self.compute_cis = partial(
-            compute_axial_cis, dim=self.internal_dim // self.num_heads, theta=rope_theta
-        )
-        freqs_cis = self.compute_cis(end_x=feat_sizes[0], end_y=feat_sizes[1])
-        self.freqs_cis = (
-            freqs_cis.to("cuda") if torch.cuda.is_available() else freqs_cis
-        )
+        if USE_MAT_ROTARY_ENC:
+            rotmats = get_rotation_matrices(dim=self.internal_dim // self.num_heads, end_x=feat_sizes[0], end_y=feat_sizes[1], theta=rope_theta)
+            self.rotmats = (rotmats.to("cuda") if torch.cuda.is_available() else rotmats)
+            self.rope_theta = rope_theta
+        else:
+            self.compute_cis = partial(
+                compute_axial_cis, dim=self.internal_dim // self.num_heads, theta=rope_theta
+            )
+            freqs_cis = self.compute_cis(end_x=feat_sizes[0], end_y=feat_sizes[1])
+            self.freqs_cis = (
+                freqs_cis.to("cuda") if torch.cuda.is_available() else freqs_cis
+            )
         self.rope_k_repeat = rope_k_repeat
+
 
     def forward(
         self, q: Tensor, k: Tensor, v: Tensor, num_k_exclude_rope: int = 0
@@ -290,19 +299,28 @@ class RoPEAttention(Attention):
 
         # Apply rotary position encoding
         w = h = math.sqrt(q.shape[-2])
-        self.freqs_cis = self.freqs_cis.to(q.device)
-        if self.freqs_cis.shape[0] != q.shape[-2]:
-            self.freqs_cis = self.compute_cis(end_x=w, end_y=h).to(q.device)
+        if not USE_MAT_ROTARY_ENC:
+            self.freqs_cis = self.freqs_cis.to(q.device)
+            if self.freqs_cis.shape[0] != q.shape[-2]:
+                self.freqs_cis = self.compute_cis(end_x=w, end_y=h).to(q.device)
         if q.shape[-2] != k.shape[-2]:
             assert self.rope_k_repeat
 
         num_k_rope = k.size(-2) - num_k_exclude_rope
-        q, k[:, :, :num_k_rope] = apply_rotary_enc(
-            q,
-            k[:, :, :num_k_rope],
-            freqs_cis=self.freqs_cis,
-            repeat_freqs_k=self.rope_k_repeat,
-        )
+        if USE_MAT_ROTARY_ENC:
+            q, k[:, :, :num_k_rope] = apply_rotary_matenc_512(
+                q,
+                k[:, :, :num_k_rope],
+                rotmats=self.rotmats,
+                repeat_freqs_k=self.rope_k_repeat,
+            )
+        else:
+            q, k[:, :, :num_k_rope] = apply_rotary_enc(
+                q,
+                k[:, :, :num_k_rope],
+                freqs_cis=self.freqs_cis,
+                repeat_freqs_k=self.rope_k_repeat,
+            )
 
         dropout_p = self.dropout_p if self.training else 0.0
         # Attention
@@ -329,11 +347,16 @@ class EfficientRoPEAttention1(Attention):
     ):
         super().__init__(*args, **kwargs)
 
-        self.compute_cis = partial(
-            compute_axial_cis, dim=self.internal_dim // self.num_heads, theta=rope_theta
-        )
-        freqs_cis = self.compute_cis(end_x=feat_sizes[0], end_y=feat_sizes[1])
-        self.freqs_cis = freqs_cis
+        if USE_MAT_ROTARY_ENC:
+            rotmats = get_rotation_matrices(dim=self.internal_dim // self.num_heads, end_x=feat_sizes[0], end_y=feat_sizes[1], theta=rope_theta)
+            self.rotmats = self.rotmats = (rotmats.to("cuda") if torch.cuda.is_available() else rotmats)
+            self.rope_theta = rope_theta
+        else:
+            self.compute_cis = partial(
+                compute_axial_cis, dim=self.internal_dim // self.num_heads, theta=rope_theta
+            )
+            freqs_cis = self.compute_cis(end_x=feat_sizes[0], end_y=feat_sizes[1])
+            self.freqs_cis = freqs_cis
         self.rope_k_repeat = rope_k_repeat
 
     def forward(
@@ -351,19 +374,28 @@ class EfficientRoPEAttention1(Attention):
 
         # Apply rotary position encoding
         w = h = math.sqrt(q.shape[-2])
-        self.freqs_cis = self.freqs_cis.to(q.device)
-        if self.freqs_cis.shape[0] != q.shape[-2]:
-            self.freqs_cis = self.compute_cis(end_x=w, end_y=h).to(q.device)
+        if not USE_MAT_ROTARY_ENC:
+            self.freqs_cis = self.freqs_cis.to(q.device)
+            if self.freqs_cis.shape[0] != q.shape[-2]:
+                self.freqs_cis = self.compute_cis(end_x=w, end_y=h).to(q.device)
         if q.shape[-2] != k.shape[-2]:
             assert self.rope_k_repeat
 
         num_k_rope = k.size(-2) - num_k_exclude_rope
-        q, k[:, :, :num_k_rope] = apply_rotary_enc(
-            q,
-            k[:, :, :num_k_rope],
-            freqs_cis=self.freqs_cis,
-            repeat_freqs_k=self.rope_k_repeat,
-        )
+        if USE_MAT_ROTARY_ENC:
+            q, k[:, :, :num_k_rope] = apply_rotary_matenc_512(
+                q,
+                k[:, :, :num_k_rope],
+                rotmats=self.rotmats,
+                repeat_freqs_k=self.rope_k_repeat,
+            )
+        else:
+            q, k[:, :, :num_k_rope] = apply_rotary_enc(
+                q,
+                k[:, :, :num_k_rope],
+                freqs_cis=self.freqs_cis,
+                repeat_freqs_k=self.rope_k_repeat,
+            )
 
         dropout_p = self.dropout_p if self.training else 0.0
 
@@ -442,11 +474,16 @@ class EfficientRoPEAttention2(Attention):
     ):
         super().__init__(*args, **kwargs)
 
-        self.compute_cis = partial(
-            compute_axial_cis, dim=self.internal_dim // self.num_heads, theta=rope_theta
-        )
-        freqs_cis = self.compute_cis(end_x=feat_sizes[0], end_y=feat_sizes[1])
-        self.freqs_cis = freqs_cis
+        if USE_MAT_ROTARY_ENC:
+            rotmats = get_rotation_matrices(dim=self.internal_dim // self.num_heads, end_x=feat_sizes[0], end_y=feat_sizes[1], theta=rope_theta)
+            self.rotmats = (rotmats.to("cuda") if torch.cuda.is_available() else rotmats)
+            self.rope_theta = rope_theta
+        else:
+            self.compute_cis = partial(
+                compute_axial_cis, dim=self.internal_dim // self.num_heads, theta=rope_theta
+            )
+            freqs_cis = self.compute_cis(end_x=feat_sizes[0], end_y=feat_sizes[1])
+            self.freqs_cis = freqs_cis
         self.rope_k_repeat = rope_k_repeat
 
     def forward(
@@ -464,19 +501,28 @@ class EfficientRoPEAttention2(Attention):
 
         # Apply rotary position encoding
         w = h = math.sqrt(q.shape[-2])
-        self.freqs_cis = self.freqs_cis.to(q.device)
-        if self.freqs_cis.shape[0] != q.shape[-2]:
-            self.freqs_cis = self.compute_cis(end_x=w, end_y=h).to(q.device)
+        if not USE_MAT_ROTARY_ENC:
+            self.freqs_cis = self.freqs_cis.to(q.device)
+            if self.freqs_cis.shape[0] != q.shape[-2]:
+                self.freqs_cis = self.compute_cis(end_x=w, end_y=h).to(q.device)
         if q.shape[-2] != k.shape[-2]:
             assert self.rope_k_repeat
 
         num_k_rope = k.size(-2) - num_k_exclude_rope
-        q, k[:, :, :num_k_rope] = apply_rotary_enc(
-            q,
-            k[:, :, :num_k_rope],
-            freqs_cis=self.freqs_cis,
-            repeat_freqs_k=self.rope_k_repeat,
-        )
+        if USE_MAT_ROTARY_ENC:
+            q, k[:, :, :num_k_rope] = apply_rotary_matenc_512(
+                q,
+                k[:, :, :num_k_rope],
+                rotmats=self.rotmats,
+                repeat_freqs_k=self.rope_k_repeat,
+            )
+        else:
+            q, k[:, :, :num_k_rope] = apply_rotary_enc(
+                q,
+                k[:, :, :num_k_rope],
+                freqs_cis=self.freqs_cis,
+                repeat_freqs_k=self.rope_k_repeat,
+            )
 
         dropout_p = self.dropout_p if self.training else 0.0
 

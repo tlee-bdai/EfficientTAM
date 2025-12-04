@@ -48,7 +48,7 @@ class PromptEncoder(nn.Module):
             nn.Embedding(1, embed_dim) for i in range(self.num_point_embeddings)
         ]
         self.point_embeddings = nn.ModuleList(point_embeddings)
-        self.not_a_point_embed = nn.Embedding(1, embed_dim, device="cpu")
+        self.not_a_point_embed = nn.Embedding(1, embed_dim)
 
         self.mask_input_size = (
             4 * image_embedding_size[0],
@@ -92,10 +92,13 @@ class PromptEncoder(nn.Module):
         point_embedding = self.pe_layer.forward_with_coords(
             points, self.input_image_size
         )
-
+        # self.not_a_point_embed = self.not_a_point_embed.to(point_embedding.device)
+        # print(self.not_a_point_embed.weight.size())
+        # print(point_embedding.size())
+        # torch.zeros_like(point_embedding)
         point_embedding = torch.where(
             (labels == -1).unsqueeze(-1),
-            torch.zeros_like(point_embedding, device=self.not_a_point_embed.weight.device) + self.not_a_point_embed.weight,
+            torch.zeros_like(point_embedding) + self.not_a_point_embed.weight.unsqueeze(0),
             point_embedding,
         )
         point_embedding = torch.where(

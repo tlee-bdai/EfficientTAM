@@ -149,7 +149,7 @@ def build_efficienttam_online_tracker(
     vos_optimized=False,
     **kwargs,
 ):
-    if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 8:
+    if True:#not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 8:
         print("Disable torch compile due to unsupported GPU.")
         hydra_overrides_extra = ["++model.compile_image_encoder=False"]
         vos_optimized = False

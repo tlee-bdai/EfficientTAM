@@ -141,7 +141,7 @@ class PositionEmbeddingRandom(nn.Module):
             scale = 1.0
         self.register_buffer(
             "positional_encoding_gaussian_matrix",
-            scale * torch.randn((2, num_pos_feats)),
+            scale * torch.randn((2, num_pos_feats), dtype=torch.float32),
         )
 
     def _pe_encoding(self, coords: torch.Tensor) -> torch.Tensor:
@@ -173,7 +173,7 @@ class PositionEmbeddingRandom(nn.Module):
         coords = coords_input.clone()
         coords[:, :, 0] = coords[:, :, 0] / image_size[1]
         coords[:, :, 1] = coords[:, :, 1] / image_size[0]
-        return self._pe_encoding(coords.to(torch.float))  # B x N x C
+        return self._pe_encoding(coords.to(torch.float32))  # B x N x C
 
 
 # Rotary Positional Encoding, adapted from:
@@ -237,3 +237,44 @@ def apply_rotary_enc(
             freqs_cis = freqs_cis.unsqueeze(2).expand(-1, -1, r, -1, -1).flatten(2, 3)
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
     return xq_out.type_as(xq).to(xq.device), xk_out.type_as(xk).to(xk.device)
+
+# pulled from sam2 implementation to get around onnx
+def apply_rotary_matenc_512(xq, xk, rotmats, repeat_freqs_k=False):
+    bq, hq, nq, cq = xq.shape
+    q_rotmat = rotmats.reshape(1024, 128, 2, 2)
+    q_out = torch.matmul(q_rotmat, xq.reshape(nq, 128, 2, 1)).reshape(1, 1, 1024, 256)
+
+    bk, hk, nk, ck = xk.shape
+    k_rotmat = q_rotmat.repeat(nk // 1024, 1, 1, 1)
+
+    bk, hk, nk, ck = xk.shape
+    k_in = xk.reshape(nk, 128, 2, 1)
+    k_out = torch.matmul(k_rotmat, k_in).reshape(1, 1, nk, 256)
+    return q_out, k_out
+
+# Matrix version of rotary enc
+# https://github.com/facebookresearch/segment-anything-2/issues/186
+
+def get_rotation_matrices(dim, end_x, end_y, theta=10000.0, device=None, dtype=None):
+
+    powers = torch.linspace(0, 1, 1 + (dim // 4), device=device, dtype=dtype)[:-1]
+    base_angles = torch.pow(theta, -powers)
+
+    end_x, end_y = int(end_x), int(end_y)
+    x_mults = torch.arange(end_x, device=device, dtype=dtype).repeat(end_y)
+    y_mults = torch.arange(end_y, device=device, dtype=dtype).repeat_interleave(end_x)
+    angles_xy = (torch.outer(mults, base_angles) for mults in (x_mults, y_mults))
+
+    rotmats_list = []
+    for angles in angles_xy:
+        sterm, cterm = torch.sin(-angles), torch.cos(-angles)
+        rotmat = torch.stack(
+            [
+                torch.stack([cterm, -sterm], dim=-1),
+                torch.stack([sterm, cterm], dim=-1),
+            ],
+            dim=-1,
+        )
+        rotmats_list.append(rotmat)
+
+    return torch.cat(rotmats_list, dim=1).unsqueeze(0).unsqueeze(0)
