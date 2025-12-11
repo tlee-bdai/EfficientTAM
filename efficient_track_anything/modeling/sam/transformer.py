@@ -21,7 +21,7 @@ from efficient_track_anything.modeling.position_encoding import (
 from torch import nn, Tensor
 
 # Use matrix version of rotrary enc
-USE_MAT_ROTARY_ENC = True
+USE_MAT_ROTARY_ENC = False
 
 class TwoWayTransformer(nn.Module):
     def __init__(
